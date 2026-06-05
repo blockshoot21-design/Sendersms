@@ -23,7 +23,4 @@ RUN playwright install chromium
 
 COPY bot.py .
 
-# Carpeta de sesión persistente (monta como volumen en producción)
-VOLUME ["/app/gm_session"]
-
 CMD ["python", "bot.py"]
