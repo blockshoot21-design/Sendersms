@@ -42,8 +42,8 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN — edita aquí
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN    = "8977035442:AAGA2HmaEWM7iTqNF87gAs0KJEXHhB75rGU"          # Token de @BotFather
-ALLOWED_USER = "K11000K"        # Username de Telegram sin @ (ej: K11000K)
+BOT_TOKEN    = "TU_TOKEN_AQUI"          # Token de @BotFather
+ALLOWED_USER = "TU_USUARIO_AQUI"        # Username de Telegram sin @ (ej: K11000K)
                                          # Pon "*" para permitir a todos
 
 PAIS_PREFIJO   = "+34"        # Prefijo por defecto para números sin código de país
@@ -230,18 +230,30 @@ async def init_browser():
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-software-rasterizer",
+            # Ocultar detección de automatización
+            "--disable-blink-features=AutomationControlled",
             "--disable-notifications",
             "--disable-infobars",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-default-apps",
-            "--disable-background-networking",
             "--disable-extensions",
             "--mute-audio",
+            "--window-size=1280,900",
         ],
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
         viewport={"width": 1280, "height": 900},
         ignore_https_errors=True,
     )
+    # Eliminar el flag navigator.webdriver que delata la automatización
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+    """)
     state["pw"] = pw
     state["context"] = context
     return context
@@ -558,48 +570,85 @@ async def do_connect(app: Application, chat: int) -> None:
 
         # Capturar el QR
         page = await context.new_page()
-        await page.goto(URL_BASE, wait_until="networkidle", timeout=TIMEOUT_NAV)
-        await asyncio.sleep(5)   # Esperar a que Angular cargue el QR
+        await page.goto(URL_BASE, wait_until="domcontentloaded", timeout=TIMEOUT_NAV)
+
+        # Esperar a que Angular arranque (hasta 20 seg)
+        try:
+            await page.wait_for_selector("mws-app", timeout=20_000)
+        except Exception:
+            pass
+        await asyncio.sleep(4)
 
         qr_screenshot = None
 
-        # Intento 1: buscar el canvas/img del QR con selectores conocidos
-        SEL_QR_LIST = [
-            "mws-qr-code canvas",
-            "mws-qr-code img",
-            "[data-e2e-qr-code] canvas",
-            "[data-e2e-qr-code] img",
-            "canvas[aria-label*='QR']",
-            "canvas[aria-label*='qr']",
-            ".qr-code canvas",
-            ".qr-code img",
-        ]
-        for sel in SEL_QR_LIST:
-            try:
-                el = page.locator(sel).first
-                if await el.count() > 0:
-                    await el.wait_for(state="visible", timeout=8_000)
-                    qr_screenshot = await el.screenshot()
-                    log.warning("QR capturado con selector: %s", sel)
-                    break
-            except Exception:
-                continue
+        # ── Método 1: JavaScript extrae el canvas directamente ──────────────
+        # Esto funciona aunque la página "se vea" blanca; los píxeles están en memoria
+        try:
+            data_url = await page.evaluate("""
+                () => {
+                    // Intentar varias rutas al canvas del QR
+                    const selectors = [
+                        'mws-qr-code canvas',
+                        'canvas',
+                        '[data-e2e-qr-code] canvas',
+                    ];
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el && el.width > 50 && el.height > 50) {
+                            try { return el.toDataURL('image/png'); } catch(e) {}
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if data_url and data_url.startswith("data:image/png;base64,"):
+                import base64
+                raw = base64.b64decode(data_url.split(",", 1)[1])
+                if len(raw) > 1000:
+                    qr_screenshot = raw
+                    log.warning("QR capturado via JavaScript canvas")
+        except Exception as e:
+            log.warning("JS canvas failed: %s", e)
 
-        # Intento 2: screenshot completo si no encontramos el elemento
+        # ── Método 2: screenshot del elemento ──────────────────────────────
+        if not qr_screenshot:
+            SEL_QR_LIST = [
+                "mws-qr-code canvas",
+                "mws-qr-code img",
+                "[data-e2e-qr-code] canvas",
+                "[data-e2e-qr-code] img",
+                "canvas",
+            ]
+            for sel in SEL_QR_LIST:
+                try:
+                    el = page.locator(sel).first
+                    if await el.count() > 0:
+                        await el.wait_for(state="visible", timeout=5_000)
+                        shot = await el.screenshot()
+                        if shot and len(shot) > 1000:
+                            qr_screenshot = shot
+                            log.warning("QR via elemento: %s", sel)
+                            break
+                except Exception:
+                    continue
+
+        # ── Método 3: screenshot de página completa (último recurso) ────────
         if not qr_screenshot:
             try:
-                qr_screenshot = await page.screenshot(full_page=False)
-                log.warning("QR: usando screenshot completo de la página")
+                shot = await page.screenshot(full_page=False)
+                if shot and len(shot) > 2000:
+                    qr_screenshot = shot
+                    log.warning("QR via screenshot completo")
             except Exception as e:
-                log.error("Screenshot fallido: %s", e)
+                log.error("Screenshot total fallido: %s", e)
 
         try: await page.close()
         except: pass
 
-        if not qr_screenshot or len(qr_screenshot) < 500:
+        if not qr_screenshot:
             await live(app, chat,
                 "⚠️ *No se pudo capturar el QR*\n\n"
-                "El navegador no renderizó la página correctamente.\n"
+                "El navegador no pudo cargar Google Messages.\n"
                 "Pulsa *Conectar* para reintentar.",
                 kb_main(),
             )
