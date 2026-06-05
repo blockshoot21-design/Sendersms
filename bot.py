@@ -42,8 +42,8 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN — edita aquí
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN    = "TU_TOKEN_AQUI"          # Token de @BotFather
-ALLOWED_USER = "TU_USUARIO_AQUI"        # Username de Telegram sin @ (ej: K11000K)
+BOT_TOKEN    = "8977035442:AAGA2HmaEWM7iTqNF87gAs0KJEXHhB75rGU"      # Token de @BotFather
+ALLOWED_USER = "K11000K"        # Username de Telegram sin @ (ej: K11000K)
                                          # Pon "*" para permitir a todos
 
 PAIS_PREFIJO   = "+34"        # Prefijo por defecto para números sin código de país
