@@ -42,8 +42,8 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN — edita aquí
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN    = "8977035442:AAGA2HmaEWM7iTqNF87gAs0KJEXHhB75rGU"          # Token de @BotFather
-ALLOWED_USER = "K11000K"        # Username de Telegram sin @ (ej: K11000K)
+BOT_TOKEN    = "TU_TOKEN_AQUI"          # Token de @BotFather
+ALLOWED_USER = "TU_USUARIO_AQUI"        # Username de Telegram sin @ (ej: K11000K)
                                          # Pon "*" para permitir a todos
 
 PAIS_PREFIJO   = "+34"        # Prefijo por defecto para números sin código de país
@@ -225,13 +225,22 @@ async def init_browser():
         SESSION_DIR,
         headless=True,
         args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
             "--disable-notifications",
             "--disable-infobars",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-default-apps",
+            "--disable-background-networking",
+            "--disable-extensions",
+            "--mute-audio",
         ],
-        viewport={"width": 1280, "height": 800},
+        viewport={"width": 1280, "height": 900},
+        ignore_https_errors=True,
     )
     state["pw"] = pw
     state["context"] = context
@@ -549,27 +558,49 @@ async def do_connect(app: Application, chat: int) -> None:
 
         # Capturar el QR
         page = await context.new_page()
-        await page.goto(URL_BASE, wait_until="domcontentloaded", timeout=TIMEOUT_NAV)
-        await asyncio.sleep(3)
+        await page.goto(URL_BASE, wait_until="networkidle", timeout=TIMEOUT_NAV)
+        await asyncio.sleep(5)   # Esperar a que Angular cargue el QR
 
         qr_screenshot = None
-        try:
-            qr_el = page.locator(SEL_QR).first
-            await qr_el.wait_for(state="visible", timeout=20_000)
-            qr_screenshot = await qr_el.screenshot()
-        except Exception:
-            # Fallback: captura completa de la pantalla
-            try:
-                qr_screenshot = await page.screenshot()
-            except Exception:
-                pass
-        finally:
-            try: await page.close()
-            except: pass
 
+        # Intento 1: buscar el canvas/img del QR con selectores conocidos
+        SEL_QR_LIST = [
+            "mws-qr-code canvas",
+            "mws-qr-code img",
+            "[data-e2e-qr-code] canvas",
+            "[data-e2e-qr-code] img",
+            "canvas[aria-label*='QR']",
+            "canvas[aria-label*='qr']",
+            ".qr-code canvas",
+            ".qr-code img",
+        ]
+        for sel in SEL_QR_LIST:
+            try:
+                el = page.locator(sel).first
+                if await el.count() > 0:
+                    await el.wait_for(state="visible", timeout=8_000)
+                    qr_screenshot = await el.screenshot()
+                    log.warning("QR capturado con selector: %s", sel)
+                    break
+            except Exception:
+                continue
+
+        # Intento 2: screenshot completo si no encontramos el elemento
         if not qr_screenshot:
+            try:
+                qr_screenshot = await page.screenshot(full_page=False)
+                log.warning("QR: usando screenshot completo de la página")
+            except Exception as e:
+                log.error("Screenshot fallido: %s", e)
+
+        try: await page.close()
+        except: pass
+
+        if not qr_screenshot or len(qr_screenshot) < 500:
             await live(app, chat,
-                "⚠️ *No se pudo capturar el QR*\nIntenta de nuevo.",
+                "⚠️ *No se pudo capturar el QR*\n\n"
+                "El navegador no renderizó la página correctamente.\n"
+                "Pulsa *Conectar* para reintentar.",
                 kb_main(),
             )
             state["phase"] = "idle"
