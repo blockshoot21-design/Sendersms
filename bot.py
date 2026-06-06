@@ -20,6 +20,7 @@ USO:
 """
 
 import asyncio
+import base64
 import io
 import logging
 import os
@@ -42,15 +43,15 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN — edita aquí
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN    = "8977035442:AAGA2HmaEWM7iTqNF87gAs0KJEXHhB75rGU"      # Token de @BotFather
-ALLOWED_USER = "K11000K"        # Username de Telegram sin @ (ej: K11000K)
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "TU_TOKEN_AQUI")
+ALLOWED_USER = os.environ.get("ALLOWED_USER", "TU_USUARIO_AQUI")
                                          # Pon "*" para permitir a todos
 
 PAIS_PREFIJO   = "+34"        # Prefijo por defecto para números sin código de país
 PAUSA_ENVIO    = 2.0          # Segundos entre mensajes (sube si Google bloquea)
 MAX_REINTENTOS = 2            # Reintentos por número antes de marcarlo como fallido
 TIMEOUT_CAMPO  = 12_000       # ms para esperar campos en pantalla
-TIMEOUT_NAV    = 25_000       # ms para carga de página
+TIMEOUT_NAV    = 30_000       # ms para carga de página
 NUM_PAGINAS    = 10           # Páginas paralelas (10 mensajes a la vez)
 SESSION_DIR    = "./gm_session"          # Carpeta de sesión persistente
 
@@ -59,7 +60,7 @@ URL_NUEVA = "https://messages.google.com/web/conversations/new"
 # ══════════════════════════════════════════════════════════════
 
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger(__name__)
@@ -115,13 +116,80 @@ SEL_LISTO = (
     'button:has-text("Start chat"), '
     '[data-e2e-new-conversation-button]'
 )
-SEL_QR = (
-    'mws-qr-code canvas, '
-    'mws-qr-code img, '
-    '[data-e2e-qr-code] canvas, '
-    '[data-e2e-qr-code] img, '
-    'canvas[aria-label*="QR"]'
-)
+
+# ──────────────────────────────────────────────────────────────
+#  SCRIPT DE STEALTH — oculta señales de automatización
+# ──────────────────────────────────────────────────────────────
+STEALTH_SCRIPT = """
+(() => {
+    // Eliminar navigator.webdriver (principal señal de detección)
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+        configurable: true
+    });
+
+    // Simular plugins reales de Chrome
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const plugins = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            plugins.refresh = () => {};
+            plugins.item = (i) => plugins[i];
+            plugins.namedItem = (n) => plugins.find(p => p.name === n);
+            Object.setPrototypeOf(plugins, PluginArray.prototype);
+            return plugins;
+        }
+    });
+
+    // Idiomas reales
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['es-ES', 'es', 'en-US', 'en']
+    });
+
+    // Objeto window.chrome completo
+    if (!window.chrome) {
+        window.chrome = {
+            app: { isInstalled: false, InstallState: {}, RunningState: {} },
+            csi: function() {},
+            loadTimes: function() {},
+            runtime: {
+                OnInstalledReason: {},
+                OnRestartRequiredReason: {},
+                PlatformArch: {},
+                PlatformOs: {},
+                RequestUpdateCheckStatus: {}
+            }
+        };
+    }
+
+    // Permisos (evita fingerprinting por permisos)
+    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (origQuery) {
+        window.navigator.permissions.query = (parameters) =>
+            parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : origQuery(parameters);
+    }
+
+    // Ocultar que es headless en User-Agent Data
+    if (navigator.userAgentData) {
+        Object.defineProperty(navigator, 'userAgentData', {
+            get: () => ({
+                brands: [
+                    { brand: 'Chromium', version: '124' },
+                    { brand: 'Google Chrome', version: '124' },
+                    { brand: 'Not-A.Brand', version: '99' }
+                ],
+                mobile: false,
+                platform: 'Windows'
+            })
+        });
+    }
+})();
+"""
 
 # ══════════════════════════════════════════════════════════════
 #  HELPERS
@@ -218,44 +286,64 @@ async def live(app: Application, chat: int, text: str,
 # ══════════════════════════════════════════════════════════════
 
 async def init_browser():
-    """Inicia Playwright con contexto persistente (sesión guardada)."""
+    """
+    Inicia Playwright con contexto persistente.
+    Flags optimizados para entornos Docker/Railway sin GPU.
+    Anti-detección para que Google no bloquee el renderizado.
+    """
     Path(SESSION_DIR).mkdir(parents=True, exist_ok=True)
     pw = await async_playwright().start()
+
     context = await pw.chromium.launch_persistent_context(
         SESSION_DIR,
         headless=True,
         args=[
+            # ── Necesarios en Docker (sin sandbox, sin GPU) ──
             "--no-sandbox",
             "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
+            "--disable-dev-shm-usage",          # /dev/shm suele ser pequeño en Docker
             "--disable-gpu",
-            "--disable-software-rasterizer",
-            # Ocultar detección de automatización
+            "--use-gl=swiftshader",             # Renderer software: canvas funciona sin GPU
+
+            # ── Headless moderno (más parecido a browser real) ──
+            "--headless=new",
+
+            # ── Anti-detección ──
             "--disable-blink-features=AutomationControlled",
-            "--disable-notifications",
-            "--disable-infobars",
+            "--disable-features=AutomationControlled",
+
+            # ── Estabilidad ──
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-default-apps",
+            "--disable-notifications",
+            "--disable-infobars",
             "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--metrics-recording-only",
             "--mute-audio",
             "--window-size=1280,900",
+            "--lang=es-ES",
         ],
+        viewport={"width": 1280, "height": 900},
+        # User-agent de Chrome 124 real en Windows (sin "HeadlessChrome")
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        viewport={"width": 1280, "height": 900},
-        ignore_https_errors=True,
+        locale="es-ES",
+        timezone_id="Europe/Madrid",
+        accept_downloads=True,
     )
-    # Eliminar el flag navigator.webdriver que delata la automatización
-    await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        window.chrome = { runtime: {} };
-    """)
-    state["pw"] = pw
+
+    # Inyectar stealth en TODAS las páginas antes de que carguen
+    await context.add_init_script(STEALTH_SCRIPT)
+
+    state["pw"]      = pw
     state["context"] = context
+    log.info("Navegador iniciado con stealth y swiftshader")
     return context
 
 
@@ -339,6 +427,140 @@ async def esperar_autenticacion(context, timeout_s: int = 180) -> bool:
     finally:
         try: await page.close()
         except: pass
+
+
+async def capturar_qr(context) -> bytes | None:
+    """
+    Abre messages.google.com, espera al canvas del QR y lo devuelve como PNG.
+    Estrategia en 3 capas:
+      1. JS: esperar píxeles reales en el canvas, luego toDataURL()
+      2. Playwright: screenshot del elemento
+      3. Screenshot completo (diagnóstico)
+    """
+    page = await context.new_page()
+    qr_bytes = None
+
+    try:
+        log.info("Navegando a Google Messages...")
+        await page.goto(URL_BASE, wait_until="domcontentloaded", timeout=TIMEOUT_NAV)
+
+        # Esperar a que Angular arranque
+        try:
+            await page.wait_for_load_state("networkidle", timeout=12_000)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+        # ── Capa 1: esperar canvas con píxeles no-blancos ──────────────────
+        log.info("Esperando canvas del QR con contenido real...")
+        try:
+            await page.wait_for_function(
+                """
+                () => {
+                    const selectors = [
+                        'mws-qr-code canvas',
+                        '[data-e2e-qr-code] canvas',
+                        'canvas'
+                    ];
+                    for (const sel of selectors) {
+                        const canvas = document.querySelector(sel);
+                        if (!canvas || canvas.width < 50 || canvas.height < 50) continue;
+                        try {
+                            const ctx = canvas.getContext('2d');
+                            if (!ctx) continue;
+                            const imageData = ctx.getImageData(
+                                0, 0, canvas.width, canvas.height
+                            );
+                            const data = imageData.data;
+                            // Buscar píxel oscuro (negro del QR)
+                            for (let i = 0; i < data.length; i += 4) {
+                                if (data[i] < 100 && data[i+1] < 100 && data[i+2] < 100
+                                    && data[i+3] > 200) {
+                                    return true;
+                                }
+                            }
+                        } catch(e) { continue; }
+                    }
+                    return false;
+                }
+                """,
+                timeout=25_000,
+            )
+            log.info("Canvas con contenido detectado, extrayendo PNG via JS...")
+
+            data_url = await page.evaluate(
+                """
+                () => {
+                    const selectors = [
+                        'mws-qr-code canvas',
+                        '[data-e2e-qr-code] canvas',
+                        'canvas'
+                    ];
+                    for (const sel of selectors) {
+                        const c = document.querySelector(sel);
+                        if (c && c.width > 50) {
+                            try { return c.toDataURL('image/png'); } catch(e) {}
+                        }
+                    }
+                    return null;
+                }
+                """
+            )
+
+            if data_url and data_url.startswith("data:image/png;base64,"):
+                raw = base64.b64decode(data_url.split(",", 1)[1])
+                if len(raw) > 1000:
+                    log.info("QR capturado via JS canvas (%d bytes)", len(raw))
+                    qr_bytes = raw
+
+        except Exception as e:
+            log.warning("Capa 1 (JS canvas) falló: %s", e)
+
+        # ── Capa 2: screenshot del elemento ───────────────────────────────
+        if not qr_bytes:
+            log.info("Intentando screenshot de elemento...")
+            for sel in [
+                "mws-qr-code canvas",
+                "mws-qr-code",
+                "[data-e2e-qr-code]",
+                "[data-e2e-qr-code] canvas",
+                "canvas",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.count() > 0:
+                        await el.scroll_into_view_if_needed()
+                        await asyncio.sleep(0.5)
+                        shot = await el.screenshot()
+                        if shot and len(shot) > 2000:
+                            log.info("QR capturado via screenshot elemento '%s'", sel)
+                            qr_bytes = shot
+                            break
+                except Exception as e:
+                    log.debug("Selector '%s' falló: %s", sel, e)
+                    continue
+
+        # ── Capa 3: screenshot completo (debug) ────────────────────────────
+        if not qr_bytes:
+            log.warning("Capas 1 y 2 fallaron, guardando screenshot completo para debug...")
+            try:
+                shot = await page.screenshot(full_page=False)
+                # Guardar para diagnóstico
+                debug_path = Path(SESSION_DIR) / "debug_qr.png"
+                debug_path.write_bytes(shot)
+                log.warning("Screenshot debug guardado en %s (%d bytes)", debug_path, len(shot))
+                if shot and len(shot) > 5000:
+                    qr_bytes = shot
+            except Exception as e:
+                log.error("Screenshot completo falló: %s", e)
+
+    except Exception as e:
+        log.error("capturar_qr error general: %s", e)
+    finally:
+        try: await page.close()
+        except: pass
+
+    return qr_bytes
 
 
 # ══════════════════════════════════════════════════════════════
@@ -486,7 +708,6 @@ async def run_bulk_send(app: Application, chat: int) -> None:
         lote_contactos = contacts[idx: idx + NUM_PAGINAS]
         lote_paginas   = pages[: len(lote_contactos)]
 
-        # Lanzar todas las tareas del lote en paralelo
         tareas = [
             tarea_envio(page, numero_raw)
             for page, numero_raw in zip(lote_paginas, lote_contactos)
@@ -507,7 +728,6 @@ async def run_bulk_send(app: Application, chat: int) -> None:
 
         idx += len(lote_contactos)
 
-        # Barra de progreso
         done    = min(idx, total)
         pct     = done / total * 100
         filled  = int(pct / 100 * 10)
@@ -524,14 +744,12 @@ async def run_bulk_send(app: Application, chat: int) -> None:
         except Exception:
             pass
 
-    # ── Cerrar las 10 páginas ─────────────────────────────────
     for p in pages:
         try: await p.close()
         except: pass
     state["pages"] = []
     state["phase"] = "connected"
 
-    # ── Resumen final ─────────────────────────────────────────
     detenido = state["stop"]
     resumen = (
         f"{'⛔ *Envío detenido*' if detenido else '🏁 *¡Envío completado!*'}\n\n"
@@ -568,98 +786,28 @@ async def do_connect(app: Application, chat: int) -> None:
             )
             return
 
-        # Capturar el QR
-        page = await context.new_page()
-        await page.goto(URL_BASE, wait_until="domcontentloaded", timeout=TIMEOUT_NAV)
+        await live(app, chat,
+            "🔄 *Cargando Google Messages...*\n⏳ Capturando código QR...",
+            kb_cancel(),
+        )
 
-        # Esperar a que Angular arranque (hasta 20 seg)
-        try:
-            await page.wait_for_selector("mws-app", timeout=20_000)
-        except Exception:
-            pass
-        await asyncio.sleep(4)
+        qr_bytes = await capturar_qr(context)
 
-        qr_screenshot = None
-
-        # ── Método 1: JavaScript extrae el canvas directamente ──────────────
-        # Esto funciona aunque la página "se vea" blanca; los píxeles están en memoria
-        try:
-            data_url = await page.evaluate("""
-                () => {
-                    // Intentar varias rutas al canvas del QR
-                    const selectors = [
-                        'mws-qr-code canvas',
-                        'canvas',
-                        '[data-e2e-qr-code] canvas',
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el && el.width > 50 && el.height > 50) {
-                            try { return el.toDataURL('image/png'); } catch(e) {}
-                        }
-                    }
-                    return null;
-                }
-            """)
-            if data_url and data_url.startswith("data:image/png;base64,"):
-                import base64
-                raw = base64.b64decode(data_url.split(",", 1)[1])
-                if len(raw) > 1000:
-                    qr_screenshot = raw
-                    log.warning("QR capturado via JavaScript canvas")
-        except Exception as e:
-            log.warning("JS canvas failed: %s", e)
-
-        # ── Método 2: screenshot del elemento ──────────────────────────────
-        if not qr_screenshot:
-            SEL_QR_LIST = [
-                "mws-qr-code canvas",
-                "mws-qr-code img",
-                "[data-e2e-qr-code] canvas",
-                "[data-e2e-qr-code] img",
-                "canvas",
-            ]
-            for sel in SEL_QR_LIST:
-                try:
-                    el = page.locator(sel).first
-                    if await el.count() > 0:
-                        await el.wait_for(state="visible", timeout=5_000)
-                        shot = await el.screenshot()
-                        if shot and len(shot) > 1000:
-                            qr_screenshot = shot
-                            log.warning("QR via elemento: %s", sel)
-                            break
-                except Exception:
-                    continue
-
-        # ── Método 3: screenshot de página completa (último recurso) ────────
-        if not qr_screenshot:
-            try:
-                shot = await page.screenshot(full_page=False)
-                if shot and len(shot) > 2000:
-                    qr_screenshot = shot
-                    log.warning("QR via screenshot completo")
-            except Exception as e:
-                log.error("Screenshot total fallido: %s", e)
-
-        try: await page.close()
-        except: pass
-
-        if not qr_screenshot:
+        if not qr_bytes:
             await live(app, chat,
-                "⚠️ *No se pudo capturar el QR*\n\n"
-                "El navegador no pudo cargar Google Messages.\n"
-                "Pulsa *Conectar* para reintentar.",
+                "❌ *No se pudo obtener el QR*\n\n"
+                "El navegador no pudo cargar la página.\n"
+                "Pulsa *Reconectar* para reintentar.",
                 kb_main(),
             )
             state["phase"] = "idle"
             return
 
         # Enviar foto del QR a Telegram
-        state["live_msg_id"] = None   # El QR va como foto, no como live message
+        state["live_msg_id"] = None
         await app.bot.send_photo(
             chat,
-            io.BytesIO(qr_screenshot),
+            io.BytesIO(qr_bytes),
             caption=(
                 "📱 *Escanea este código QR*\n\n"
                 "1️⃣  Abre *Google Messages* en tu móvil\n"
@@ -697,7 +845,7 @@ async def do_connect(app: Application, chat: int) -> None:
             )
 
     except Exception as e:
-        log.error("do_connect error: %s", e)
+        log.error("do_connect error: %s", e, exc_info=True)
         if state["phase"] == "qr":
             state["phase"] = "idle"
             await app.bot.send_message(
@@ -756,7 +904,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     state["live_msg_id"] = q.message.message_id
     data = q.data
 
-    # ── MENÚ PRINCIPAL ──────────────────────────────────────
     if data == "main":
         fase = state["phase"]
         if fase == "connected":
@@ -772,7 +919,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             kb_main(),
         )
 
-    # ── CONECTAR ─────────────────────────────────────────────
     elif data == "connect":
         if state["phase"] == "sending":
             await live(ctx.application, chat,
@@ -781,22 +927,16 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await live(ctx.application, chat, "🔄 *Iniciando navegador...*", kb_cancel())
         asyncio.create_task(do_connect(ctx.application, chat))
 
-    # ── CANCELAR ─────────────────────────────────────────────
     elif data == "cancel":
         prev_phase = state["phase"]
         if prev_phase in ("qr", "wait_file", "wait_msg", "confirm"):
             if prev_phase == "qr":
                 await cleanup_browser()
             state["phase"] = "idle" if prev_phase == "qr" else "connected"
-            phase_ok = state["phase"] == "connected"
-            await live(ctx.application, chat,
-                "❌ *Cancelado*",
-                kb_main() if not phase_ok else kb_main(),
-            )
+            await live(ctx.application, chat, "❌ *Cancelado*", kb_main())
         else:
             await live(ctx.application, chat, "❌ *Nada que cancelar*", kb_main())
 
-    # ── INICIAR FLUJO DE ENVÍO ────────────────────────────────
     elif data == "send":
         if state["phase"] != "connected":
             await live(ctx.application, chat,
@@ -813,7 +953,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             kb_cancel(),
         )
 
-    # ── CONFIRMAR ENVÍO ───────────────────────────────────────
     elif data == "confirm_send":
         if state["phase"] != "confirm":
             await live(ctx.application, chat,
@@ -821,7 +960,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         asyncio.create_task(run_bulk_send(ctx.application, chat))
 
-    # ── DETENER ENVÍO ─────────────────────────────────────────
     elif data == "stop":
         if state["phase"] != "sending":
             await live(ctx.application, chat,
@@ -830,7 +968,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         state["stop"] = True
         await live(ctx.application, chat, "⛔ *Deteniendo envío...*", kb_running())
 
-    # ── ESTADO ───────────────────────────────────────────────
     elif data == "status":
         if state["phase"] != "sending":
             await live(ctx.application, chat,
@@ -850,7 +987,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             kb_running(),
         )
 
-    # ── DESCONECTAR ───────────────────────────────────────────
     elif data == "disconnect":
         if state["phase"] == "sending":
             await live(ctx.application, chat,
@@ -875,7 +1011,6 @@ async def msg_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     state["chat"] = chat
     phase = state["phase"]
 
-    # ── ESPERA ARCHIVO .TXT ───────────────────────────────────
     if phase == "wait_file":
         if update.message.document:
             doc = update.message.document
@@ -914,7 +1049,6 @@ async def msg_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="Markdown",
             )
 
-    # ── ESPERA MENSAJE ────────────────────────────────────────
     elif phase == "wait_msg":
         if update.message.text:
             mensaje = update.message.text.strip()
@@ -940,7 +1074,6 @@ async def msg_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             state["live_msg_id"] = m.message_id
 
-    # ── OTROS ESTADOS ─────────────────────────────────────────
     else:
         if update.message.text and not update.message.text.startswith("/"):
             await ctx.bot.send_message(
@@ -957,7 +1090,7 @@ async def msg_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     print("═" * 60)
-    print("   📨   Google Messages Bulk Sender — Telegram Bot v1")
+    print("   📨   Google Messages Bulk Sender — Telegram Bot v2")
     print("═" * 60)
     print(f"   🤖  Token  : {BOT_TOKEN[:10]}...")
     print(f"   👤  Usuario: @{ALLOWED_USER}")
