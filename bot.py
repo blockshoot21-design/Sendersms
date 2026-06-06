@@ -43,8 +43,8 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN — edita aquí
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "8977035442:AAGA2HmaEWM7iTqNF87gAs0KJEXHhB75rGU")
-ALLOWED_USER = os.environ.get("ALLOWED_USER", "K11000K")
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "TU_TOKEN_AQUI")
+ALLOWED_USER = os.environ.get("ALLOWED_USER", "TU_USUARIO_AQUI")
                                          # Pon "*" para permitir a todos
 
 PAIS_PREFIJO   = "+34"        # Prefijo por defecto para números sin código de país
