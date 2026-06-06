@@ -43,8 +43,8 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN — edita aquí
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "8977035442:AAGA2HmaEWM7iTqNF87gAs0KJEXHhB75rGU")
-ALLOWED_USER = os.environ.get("ALLOWED_USER", "K11000K")
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "TU_TOKEN_AQUI")
+ALLOWED_USER = os.environ.get("ALLOWED_USER", "TU_USUARIO_AQUI")
                                          # Pon "*" para permitir a todos
 
 PAIS_PREFIJO   = "+34"        # Prefijo por defecto para números sin código de país
@@ -450,6 +450,24 @@ async def capturar_qr(context) -> bytes | None:
         except Exception:
             pass
         await asyncio.sleep(2)
+
+        # ── Clic en "Emparejar con código QR" si aparece la pantalla de bienvenida ──
+        for qr_link_sel in [
+            "a[href*='pair']",
+            "text=Emparejar con código QR",
+            "text=Pair with QR code",
+            "mws-sign-in-banner a",
+            "button:has-text('QR')",
+        ]:
+            try:
+                el = page.locator(qr_link_sel).first
+                if await el.count() > 0:
+                    log.info("Haciendo clic en 'Emparejar con QR' (%s)", qr_link_sel)
+                    await el.click()
+                    await asyncio.sleep(3)
+                    break
+            except Exception:
+                continue
 
         # ── Capa 1: esperar canvas con píxeles no-blancos ──────────────────
         log.info("Esperando canvas del QR con contenido real...")
